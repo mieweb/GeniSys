@@ -1,0 +1,12 @@
+[Unit]
+Description=Script to run deb-to-proxmox.sh
+After=network.target
+Wants=network.target
+
+[Service]
+#ExecStartPre=/usr/local/bin/wait-for-ip.sh
+ExecStart=/usr/local/bin/deb-to-proxmox.sh
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,14 @@
+# D-I config version 2.0
+# search path for the c32 support libraries
+path debian-installer/amd64/boot-screens/
+# include debian-installer/amd64/boot-screens/menu.cfg
+# include debian-installer/amd64/boot-screens/vesamenu.c32
+prompt 0
+timeout 3
+default mieinstall
+
+Label mieinstall
+    menu label ^MIEInstall
+    kernel debian-installer/amd64/linux
+    append vga=788 initrd=debian-installer/amd64/initrd.gz auto=true ipv6.disable=1 priority=critical preseed/url=tftp://192.168.2.1/preseed.cfg - quiet
+	

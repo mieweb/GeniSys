@@ -1,0 +1,10 @@
+[Unit]
+Description=DHCP client for enx00e04c3613f7
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/sbin/dhclient -v enx00e04c3613f7
+
+[Install]
+WantedBy=multi-user.target

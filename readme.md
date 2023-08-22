@@ -1,4 +1,4 @@
-## Gozer[^1] Install Instructions
+## Config Manager[^1] Install Instructions
 
 
 ### Terms
@@ -120,4 +120,4 @@ To observe the PXE process:
  Once the client begins the PXE process it will automatically configure itself to install Proxmox ontop of Debian, then join or create a Proxmox cluster on the network.
 
 
- [^1]: AKA Gozer The Gozerian AKA Gozer the Destructor AKA Gozer the Traveler AKA Volguus Zildrohar AKA Lord of the Sebouillia
+ [^1]: Gozer AKA Gozer The Gozerian AKA Gozer the Destructor AKA Gozer the Traveler AKA Volguus Zildrohar AKA Lord of the Sebouillia

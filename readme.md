@@ -1,6 +1,15 @@
 ## Gozer[^1] Install Instructions
 
 
+### Terms
+
+RED interface - Network interface to the wider network/internet
+GREEN interface - Network interface to the internal, private network.
+### The easy way
+
+Install ubuntu 22.04LTS and perform base configuration. You should know what interface will be RED and GREEN, the IP address for the GREEN network (the appliance performs DHCP on the GREEN interface network), the GREEN network DHCP information(Start IP, End IP, CIDR netmask, lease length) Then as an administrator run:
+
+`wget -O - https://raw.github.mieweb.com/jchance/PXE2Proxmox/master/basic_nat_pxe_appliance/configure_content_manager.sh | bash`
 ### Install
 
 Starting from Ubuntu 22.04 LTS install necessary tools:

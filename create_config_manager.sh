@@ -1,41 +1,41 @@
 #!/bin/bash
+#TODO: Allow setting from config files, add defaults/suggestions
+#defaults: RED/GREEN Interface, DHCP Information, proxmox/debian passwords, turn on or off RED pxe listener,
+#Also need to sanity check all inputs and make sure addresses look like addresses and everything is in the correct format.
 echo "Welcome to the MIE Testing Content Manger setup."
 if [ "$EUID" -ne 0 ]; then
     echo "This script must be run as root."
     exit 1
 fi
 echo "Installing necessary tools"
-apt update && sudo apt upgrade
-apt-get install dnsmasq
-apt-get install iptables
-apt-get install iptables-persistent
-apt-get install vsftpd`
+sudo apt -y update && sudo apt -y upgrade
+sudo apt-get -y install dnsmasq
+sudo apt-get -y install iptables
+sudo apt-get -y install iptables-persistent
+sudo apt-get -y install vsftpd
+sudo apt-get -y install squid
 echo "Detecting network interfaces..."
 correct='n'
+declare -A interfaceIP
+declare -A selectInterface
+interfaces=$(ip -o link show | awk -F': ' '{print $2}')
+red_interface=""
+green_interface=""
+dhcp_configured=""
+selector=1
 until [[ $correct == 'y' ]]
-do
-    declare -A interfaceIP
-    declare -A selectInterface
-    interfaces=$(ip -o link show | awk -F': ' '{print $2}')
-    red_interface=""
-    green_interface=""
-    dhcp_configured=""
-    selector=1
+do 
     echo "Available Interfaces:"
     for iface in $interfaces; do
         if [[ $iface != "lo" ]]; then
             if [[ -n $(ip -o addr show $iface | grep -v inet6 | awk '{print $4}') ]]; then
                 interfaceIP["$iface"]=$(ip -o addr show $iface | grep -v inet6 | awk '{print $4}')
                 selectInterface["$selector"]=$iface
-                if [[ -n $(cat /var/lib/dhcp/dhclient.leases | grep $iface 2>/dev/null) ]]; then
-                    dhcp_configured="true"
-                    echo "    ${selector}. Interface $iface is up and has IP address: ${interfaceIP[$iface]}. - DHCP configured on $iface."
-                else
-                    echo "    ${selector}. Interface $iface is up and has IP address: ${interfaceIP[$iface]}. - No DHCP configured on $iface."
-                fi
+                 echo "    ${selector}. Interface $iface is up and has IP address: ${interfaceIP[$iface]}"
             else
-                interfaceIP["$iface"]="0.0.0.0"
-                echo "${selector}. Interface $iface is not up and has no IP address."
+                interfaceIP["$iface"]="0.0.0.0/0"
+                selectInterface["$selector"]=$iface
+                echo "    ${selector}. Interface $iface is not up and has no IP address."
             fi
             (( selector++ ))
         fi
@@ -48,24 +48,36 @@ do
     echo "    GREEN - ${selectInterface[$green_interface]} - ${interfaceIP[${selectInterface[$green_interface]}]}"
     read -p "Is this correct y/n?" correct
 done
+red_interface="${selectInterface[$red_interface]}"
+red_ip_and_mask="${interfaceIP[${red_interface}]}"
+red_ip="${red_ip_and_mask%%/*}"
+green_interface="${selectInterface[$green_interface]}"
+green_ip_and_mask="${interfaceIP[${green_interface}]}"
+green_ip="${green_ip_and_mask%%/*}"
 correct='n'
-while [[ $correct == 'y' ]]
+echo "RED - interface: ${red_interface} | ip: ${red_ip}"
+echo "GREEN - interface: ${green_interface} | ip: ${green_ip}"
+until [[ $correct == 'y' ]]
 do
     read -p "DHCP Range start: " dhcpStart
     read -p "DHCP Range end: " dhcpEnd
-    read -p "CIDR mask: " cidrmask
-    read -p "Lease length(in hours): " lease
-    echo "DHCP start: ${dhcpStart} | end: ${dhcpEnd} | CIDR: ${cidrmask} | lease: ${lease}h"
-    read -p "Is this correct y/n?" correct
+    read -e -i "24" -p "CIDR mask: " cidrmask
+    read -e -i "4" -p "Lease length(in hours): " lease
+    read -p "Domain Suffix (optional): " domainSuff
+    read -e -i "n" -p "Offer DHCPProxy for PXE services on RED? (y/n): " red_dhcp
+    echo "DHCP start: ${dhcpStart} | end: ${dhcpEnd} | CIDR: ${cidrmask} | "
+    echo "Lease: ${lease}h | Domain: ${domainSuff} | RED DHCPProxy?: ${red_dhcp}"
+    read -p "Is this correct? (y/n)" correct
 done
-netmask=$(printf "%d.%d.%d.%d\n" $(( 0xFFFFFFFF << (32 - $cidr) & 0xFF )) $(( 0xFFFFFFFF << (32 - $cidr) >> 8 & 0xFF )) $(( 0xFFFFFFFF << (32 - $cidr) >> 16 & 0xFF )) $(( 0xFFFFFFFF << (32 - $cidr) >> 24 & 0xFF )))
-echo "Calculated netmask: ${netmask}"
+# netmask=$(printf "%d.%d.%d.%d\n" $(( (0xFFFFFFFF << (32 - $cidrmask)) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 8) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 16) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 24) & 0xFF )))
+# inverted_netmask=$(printf "%d.%d.%d.%d\n" $((255 - $(echo $netmask | cut -d'.' -f1))) $((255 - $(echo $netmask | cut -d'.' -f2))) $((255 - $(echo $netmask | cut -d'.' -f3))) $((255 - $(echo $netmask | cut -d'.' -f4))))
+# echo "Calculated netmask: ${netmask}"
 echo "Writing config files dnsmasq.conf"
 cat <<EOF > /etc/dnsmasq.conf
 user=$(whoami)
 group=$(id -g -n)
-interface=${selectInterface[$green_interface]}
-dhcp-range=$dhcpEnd,$dhcpStart,$netmask,$lease
+interface=${green_interface}
+dhcp-range=${green_interface},${dhcpStart},${dhcpEnd},${lease}h
 dhcp-boot=pxelinux.0,pxeserver
 pxe-prompt="Network Booting", 10
 pxe-service=X86PC, "MIE PXELINUX", "pxelinux.0"
@@ -76,7 +88,18 @@ tftp-secure
 tftp-no-blocksize
 log-queries
 log-dhcp
+expand-hosts
 EOF
+if [ "$domainSuff" != "" ]; then
+cat <<EOF >> /etc/dnsmasq.conf
+domain=${domainSuff}
+EOF
+fi
+if [ $red_dhcp == "y" ]; then
+cat <<EOF >> /etc/dnsmasq.conf
+dhcp-range=${red_interface},$(echo "$red_ip" | cut -d. -f1-3).0,proxy
+EOF
+fi
 echo "Writing FTP confs"
 cat <<EOF > /etc/vsftpd.conf
 listen=NO
@@ -97,44 +120,90 @@ rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 ssl_enable=NO
 local_root=/var/ftpd
 EOF
-echo "Fixing DNS for GREEN interface"
+echo "Fixing DNS for RED interface"
 cat << EOF > /etc/systemd/system/dhclient_cm.service
 [Unit]
-Description=DHCP client for ${selectInterface[$red_interface]}
+Description=DHCP client for ${red_interface}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/sbin/dhclient -v ${selectInterface[$red_interface]}
+ExecStart=/sbin/dhclient -v ${red_interface}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 echo "Setting up packet forwarding"
 if grep -q '^net\.ipv4\.ip_forward=' /etc/sysctl.conf; then
-    sed -i "s/^net\.ipv4\.ip_forward=.*/net.ipv4.ip_forward=$new_value/" /etc/sysctl.conf
+    sed -i "s/^net\.ipv4\.ip_forward=.*/net.ipv4.ip_forward=1/" /etc/sysctl.conf
 else
-    echo "net.ipv4.ip_forward=$new_value" >> /etc/sysctl.conf
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 fi
+if [ ${green_ip} == "0.0.0.0" ]; then
+    green_ip=$(echo "$dhcpStart" | cut -d. -f1-3).1
+    echo "GREEN IP defaulted to:${green_ip}"
+fi
+cat <<EOF > /etc/netplan/01-netcfg.yaml
+network:
+  ethernets:
+    ${green_interface}:
+      dhcp4: false
+      addresses: [${green_ip}/${cidrmask}]
+    ${red_interface}:
+      dhcp4: true
+  version: 2
+EOF
+sysctl -p
+echo "Setting iptables rules"
+iptables -t nat -A POSTROUTING -o ${red_interface} -s ${green_ip}/${cidrmask} -j MASQUERADE
+iptables -P FORWARD ACCEPT
+iptables -A FORWARD -i ${green_interface} -o ${red_interface} -j ACCEPT
+iptables -A FORWARD -i ${red_interface} -o ${green_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT
+netfilter-persistent save
+netfilter-persistent reload
+echo "iptables rules set, saved, and made persistent"
+echo "Fixing services"
+systemctl stop systemd-resolved
+systemctl disable systemd-resolved
+systemctl enable dhclient_cm.service
+systemctl start dhclient_cm.service
+systemctl start dnsmasq
+systemctl enable iptables
+systemctl start iptables
+sleep 5
+
 echo "Fetching Debian image"
+mkdir -p /var/ftpd/
+cd /var/ftpd/
 wget https://ftp.debian.org/debian/dists/bullseye/main/installer-amd64/current/images/netboot/netboot.tar.gz -P /var/ftpd/
-tar -xzvf /var/ftpd/netboot.tar.gz
+tar -xzvf /var/ftpd/netboot.tar.gz > /dev/null
 rm /var/ftpd/netboot.tar.gz
-ln -s debian-installer/amd64/grubx64.efi .
-ln -s debian-installer/amd64/grub .
+ln -s -f debian-installer/amd64/grubx64.efi .
+ln -s -f debian-installer/amd64/grub .
+echo "Writing syslinux.cfg"
+cat << EOF > /var/ftpd/debian-installer/amd64/boot-screens/syslinux.cfg
+# D-I config version 2.0
+# search path for the c32 support libraries
+path debian-installer/amd64/boot-screens/
+# include debian-installer/amd64/boot-screens/menu.cfg
+# include debian-installer/amd64/boot-screens/vesamenu.c32
+prompt 0
+timeout 3
+default mieinstall
+
+Label mieinstall
+    menu label ^MIEInstall
+    kernel debian-installer/amd64/linux
+    append vga=788 initrd=debian-installer/amd64/initrd.gz auto=true ipv6.disable=1 priority=critical preseed/url=tftp://${green_ip}/preseed.cfg - quiet
+EOF
 echo "Writing preseed.cfg"
-cat <<EOF > /var/ftpd/preseed.cfg
+cat <<'EOF' > /var/ftpd/preseed.cfg
 ### Localization
 d-i debian-installer/locale string en_US
 d-i keyboard-configuration/xkb-keymap select us
 ### Network configuration
 d-i netcfg/choose_interface select auto
 ### Hostname
-#d-i preseed/early_command string \
-    # Generate a random hostname
-    #RANDOM_HOSTNAME=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 10 | head -n 1); \
-    #echo "d-i netcfg/get_hostname string ${RANDOM_HOSTNAME}-proxmox" | debconf-set-selections; \
-    #echo "d-i netcfg/hostname string ${RANDOM_HOSTNAME}-proxmox" | debconf-set-selections
 d-i netcfg/get_hostname string unassigned-hostname
 d-i netcfg/get_domain string unassigned-domain
 d-i netcfg/get_hostname seen true
@@ -185,15 +254,19 @@ d-i clock-setup/utc boolean true
 d-i clock-setup/ntp boolean true
 ### Popularity contest
 popularity-contest popularity-contest/participate boolean false
+EOF
+cat <<EOF >> /var/ftpd/preseed.cfg
 d-i preseed/late_command string \
-    in-target wget -O /tmp/deb-to-proxmox.sh ftp://${interfaceIP[${selectInterface[$green_interface]}]}/deb-to-proxmox.sh; \
-    in-target wget -O /tmp/deb-to-proxmox.service ftp://${interfaceIP[${selectInterface[$green_interface]}]}/deb-to-proxmox.service; \
+    in-target wget -O /tmp/deb-to-proxmox.sh ftp://${green_ip}/deb-to-proxmox.sh; \
+    in-target wget -O /tmp/deb-to-proxmox.service ftp://${green_ip}/deb-to-proxmox.service; \
     in-target chmod +x /tmp/deb-to-proxmox.sh; \
     in-target chmod +x /tmp/deb-to-proxmox.service; \
     in-target cp /tmp/deb-to-proxmox.sh /usr/local/bin/; \
     in-target cp /tmp/deb-to-proxmox.service /etc/systemd/system/; \
     in-target systemctl enable deb-to-proxmox.service
 EOF
+
+
 echo "Writing PXE Scripts"
 cat <<EOF > /var/ftpd/deb-to-proxmox.service
 [Unit]
@@ -206,7 +279,7 @@ ExecStart=/usr/local/bin/deb-to-proxmox.sh
 WantedBy=multi-user.target
 EOF
 
-cat <<END > /var/ftpd/deb-to-proxmox.sh
+cat <<'END' > /var/ftpd/deb-to-proxmox.sh
 #!/usr/bin/env bash
 ################################################################################
 # This is property of eXtremeSHOK.com
@@ -238,16 +311,6 @@ cat <<END > /var/ftpd/deb-to-proxmox.sh
 #
 #
 echo "Starting deb-to-proxmox"
-# Generate random hostname
-#random_string=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1 | awk '{print "proxmox-"$0}')
-#echo "Random string: $random_string"
-# Set the generated random string as the hostname
-#hostnamectl set-hostname "$random_string"
-# Update the /etc/hosts file with the new hostname
-#sed -i "s/127.0.1.1.*/127.0.1.1\t$random_string/g" /etc/hosts
-#systemctl restart networking.service
-#echo "New hostname: $random_hostname"
-
 # Set the local
 export LANG="en_US.UTF-8"
 export LC_ALL="C"
@@ -258,7 +321,16 @@ if [ -d "/run/lock" ] ; then
   mkdir /run/lock
   chmod a+rwxt /run/lock
 fi
-
+echo "GENERATING HOSTNAME"
+# Generate random hostname
+random_string=$(openssl rand 2048 | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1 | awk '{print "proxmox-"$0}')
+echo "Random string: $random_string"
+# Set the generated random string as the hostname
+hostnamectl set-hostname "$random_string"
+# Update the /etc/hosts file with the new hostname
+#systemctl restart networking.service
+echo "New hostname: $random_hostname"
+sudo dhclient -v
 echo "Deinstalling any linux firmware packages "
 firmware="$(dpkg -l | grep -i 'firmware-')"
 if [ -n "$firmware" ]; then
@@ -266,10 +338,8 @@ if [ -n "$firmware" ]; then
 else
   echo "No firmware packages loaded"
 fi
-
 echo "Deinstalling the Debian standard kernel packages "
 /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::='--force-confdef' purge linux-image-amd64
-
 echo "Removing conflicting packages"
 /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::='--force-confdef' purge os-prober
 /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::='--force-confdef' autoremove
@@ -297,16 +367,6 @@ if [ "$default_v4ip" == "" ] ; then
   echo "IP: ${default_v4ip}"
   exit 1
 fi
-echo "GENERATING HOSTNAME"
-# Generate random hostname
-random_string=$(openssl rand 2048 | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1 | awk '{print "proxmox-"$0}')
-echo "Random string: $random_string"
-# Set the generated random string as the hostname
-hostnamectl set-hostname "$random_string"
-# Update the /etc/hosts file with the new hostname
-#systemctl restart networking.service
-echo "New hostname: $random_hostname"
-
 echo "Configure /etc/hosts"
 if [ -f /etc/cloud/cloud.cfg ] ; then
   echo 'manage_etc_hosts: False' | tee --append /etc/cloud/cloud.cfg
@@ -722,45 +782,17 @@ rm /etc/systemd/system/deb-to-proxmox.service
 systemctl daemon-reload
 systemctl reset-failed
 END
-cat <<EOF > /etc/netplan/01-netcfg.yaml
-network:
-  ethernets:
-    ${selectInterface[$green_interface]}:
-      dhcp4: false
-      addresses: [${interfaceIP[${selectInterface[$red_interface]}]}${cidrmask}]
-    ${selectInterface[$red_interface]}:
-      dhcp4: true
-  version: 2
-EOF
-base_address=$(IFS=. read -r i1 i2 i3 i4 <<< "$interfaceIP[${selectInterface[$red_interface]}]"; IFS=. read -r m1 m2 m3 m4 <<< $(printf "%d.%d.%d.%d\n" "$((0xffffffff << (32 - $cidrmask)) & 0xff000000 >> 24)" "$((0xffffffff << (32 - $cidrmask)) & 0x00ff0000 >> 16)" "$((0xffffffff << (32 - $cidrmask)) & 0x0000ff00 >> 8)" "$((0xffffffff << (32 - $cidrmask)) & 0x000000ff)"); echo "$((i1 & m1)).$((i2 & m2)).$((i3 & m3)).$((i4 & m4))")
-echo "Calculating base address as: ${base_address}"
-sysctl -p
-echo "Setting iptables rules"
-iptables -t nat -A POSTROUTING -o ${selectInterface[$red_interface]} -s ${base_address}${cidrmask} -j MASQUERADE
-iptables -P FORWARD ACCEPT
-iptables -A FORWARD -i ${selectInterface[$green_interface]} -o ${selectInterface[$red_interface]} -j ACCEPT
-iptables -A FORWARD -i ${selectInterface[$red_interface]} -o ${selectInterface[$green_interface]} -m state --state RELATED,ESTABLISHED -j ACCEPT
-netfilter-persistent save
-netfilter-persistent reload
-echo "iptables rules set, saved, and made persistent"
-echo "Fixing services"
-systemctl stop systemd-resolved
-systemctl disable systemd-resolved
-systemctl enable dhclient_enx.service
-systemctl start dhclient_enx.service
-systemctl start dnsmasq
-systemctl enable iptables
-systemctl start iptables
+
 chmod -R a+r /var/ftpd/
 chown dnsmasq:root -R /var/ftpd/
 usermod -d /var/ftpd ftp
 timer=10
 while [ $timer -gt 0 ]; do
-    echo -ne "Install completed, device will reboot in $timer\033[OK\r]"
+    echo -ne "Install completed, device will reboot in ${timer}s\r"
     sleep 1
-    : $((secs--))
+    : $((timer--))
 done
-echo -ne "Install completed, device will reboot in 0\033[OK\r]"
+echo -ne "Install completed, device will reboot now...\r"
 echo ""
 echo "Goodbye!"
 reboot

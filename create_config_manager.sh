@@ -13,7 +13,8 @@ sudo apt-get -y install dnsmasq
 sudo apt-get -y install iptables
 sudo apt-get -y install iptables-persistent
 sudo apt-get -y install vsftpd
-sudo apt-get -y install squid
+# sudo apt-get -y install squid-openssl
+# sudo apt-get -y install squid-deb-proxy
 echo "Detecting network interfaces..."
 correct='n'
 declare -A interfaceIP
@@ -69,9 +70,16 @@ do
     echo "Lease: ${lease}h | Domain: ${domainSuff} | RED DHCPProxy?: ${red_dhcp}"
     read -p "Is this correct? (y/n)" correct
 done
-# netmask=$(printf "%d.%d.%d.%d\n" $(( (0xFFFFFFFF << (32 - $cidrmask)) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 8) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 16) & 0xFF )) $(( (0xFFFFFFFF << (32 - $cidrmask) >> 24) & 0xFF )))
-# inverted_netmask=$(printf "%d.%d.%d.%d\n" $((255 - $(echo $netmask | cut -d'.' -f1))) $((255 - $(echo $netmask | cut -d'.' -f2))) $((255 - $(echo $netmask | cut -d'.' -f3))) $((255 - $(echo $netmask | cut -d'.' -f4))))
-# echo "Calculated netmask: ${netmask}"
+# echo "Writing Squid config"
+# cat <<EOF > /etc/squid/conf.d/cache.conf
+# cache_dir ufs /var/spool/squid 50000 16 256
+# # refresh_pattern -i \.(zip|[g|b]z2?|tar|deb|udeb|img|map|pkg)$ 10080 90% 43200
+# http_port 3128 transparent
+# acl localnet src ${green_ip}/${cidrmask}
+# refresh_pattern -i proxmox.com/.*\.(deb|rpm)$ 10080 100% 43200 override-expire override-lastmod reload-into-ims
+# refresh_pattern -i debian.org/.*\.(deb|udeb|dsc|udeb|tar\.gz|diff|tar.xz|tar)$ 10080 100% 43200 override-expire override-lastmod reload-into-ims
+# http_access allow localnet
+# EOF
 echo "Writing config files dnsmasq.conf"
 cat <<EOF > /etc/dnsmasq.conf
 user=$(whoami)
@@ -153,23 +161,29 @@ network:
       dhcp4: true
   version: 2
 EOF
-sysctl -p
+sudo sysctl -p
 echo "Setting iptables rules"
-iptables -t nat -A POSTROUTING -o ${red_interface} -s ${green_ip}/${cidrmask} -j MASQUERADE
-iptables -P FORWARD ACCEPT
-iptables -A FORWARD -i ${green_interface} -o ${red_interface} -j ACCEPT
-iptables -A FORWARD -i ${red_interface} -o ${green_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT
-netfilter-persistent save
-netfilter-persistent reload
+sudo iptables -t nat -A POSTROUTING -o ${red_interface} -s ${green_ip}/${cidrmask} -j MASQUERADE
+sudo iptables -P FORWARD ACCEPT
+sudo iptables -A FORWARD -i ${green_interface} -o ${red_interface} -j ACCEPT
+sudo iptables -A FORWARD -i ${red_interface} -o ${green_interface} -m state --state RELATED,ESTABLISHED -j ACCEPT
+# sudo iptables -t nat -A PREROUTING -i eth1 -p tcp --dport 80 -j DNAT --to ${green_ip}:3128
+# sudo iptables -t nat -A OUTPUT -o ${red_interface} -j DNAT -p TCP --to 127.0.0.1:3128
+# sudo iptables -t nat -A OUTPUT -o ${red_interface} -j DNAT -p UDP --to 127.0.0.1:3128
+sudo netfilter-persistent save
+sudo netfilter-persistent reload
 echo "iptables rules set, saved, and made persistent"
 echo "Fixing services"
-systemctl stop systemd-resolved
-systemctl disable systemd-resolved
-systemctl enable dhclient_cm.service
-systemctl start dhclient_cm.service
-systemctl start dnsmasq
-systemctl enable iptables
-systemctl start iptables
+sudo systemctl stop systemd-resolved
+sudo systemctl disable systemd-resolved
+sudo systemctl enable dhclient_cm.service
+sudo systemctl start dhclient_cm.service
+# sudo systemctl start squid
+# sudo systemctl enable squid
+sudo systemctl start dnsmasq
+sudo systemctl enable dnsmasq
+sudo systemctl start iptables
+sudo systemctl enable iptables
 sleep 5
 
 echo "Fetching Debian image"
@@ -195,6 +209,9 @@ Label mieinstall
     menu label ^MIEInstall
     kernel debian-installer/amd64/linux
     append vga=788 initrd=debian-installer/amd64/initrd.gz auto=true ipv6.disable=1 priority=critical preseed/url=tftp://${green_ip}/preseed.cfg - quiet
+EOF
+cat << EOF > /var/ftpd/01apt-proxy
+Acquire::http::Proxy "http://${green_ip}:8000/";
 EOF
 echo "Writing preseed.cfg"
 cat <<'EOF' > /var/ftpd/preseed.cfg
@@ -259,6 +276,7 @@ cat <<EOF >> /var/ftpd/preseed.cfg
 d-i preseed/late_command string \
     in-target wget -O /tmp/deb-to-proxmox.sh ftp://${green_ip}/deb-to-proxmox.sh; \
     in-target wget -O /tmp/deb-to-proxmox.service ftp://${green_ip}/deb-to-proxmox.service; \
+    in-target wget -O /etc/apt/apt.conf.d/01apt-proxy ftp://${green_ip}/01apt-proxy; \
     in-target chmod +x /tmp/deb-to-proxmox.sh; \
     in-target chmod +x /tmp/deb-to-proxmox.service; \
     in-target cp /tmp/deb-to-proxmox.sh /usr/local/bin/; \
